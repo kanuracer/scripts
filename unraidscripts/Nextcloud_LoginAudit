@@ -1,0 +1,61 @@
+#!/bin/bash
+
+# Pfade definieren
+LOG_DIR="/mnt/user/logs"
+AUDIT_DIR="$LOG_DIR/audit/nextcloud"
+ARCHIVE_DIR="$LOG_DIR/nextcloud/archiv"
+NEXTCLOUD_LOG="$LOG_DIR/nextcloud/nextcloud.log"
+REQ_ID_LOG="$AUDIT_DIR/ReqId.log"
+USER_LOG="$AUDIT_DIR/user.log"
+
+# Rechte definieren
+NEXTCLOUD_LOG_USER="sshd:sshd" # Nutzer und Gruppe für Nextcloud.log
+NEXTCLOUD_PERM="640"
+ARCHIV_LOG_USER="nobody:users"
+ARCHIV_PERM="666"
+
+# Überprüfen und Erstellen der ReqId.log, falls nicht vorhanden
+if [ ! -f "$REQ_ID_LOG" ]; then
+    touch "$REQ_ID_LOG"
+fi
+
+# Durchsuchen der neuen nextcloud.log nach dem String "Login failed"
+grep "Login failed" "$NEXTCLOUD_LOG" | while read -r line; do
+    # Extrahieren der ReqId und Überprüfen, ob sie bereits in ReqId.log vorhanden ist
+    reqId=$(echo "$line" | grep -o '"reqId":"[^"]*' | cut -d'"' -f4)
+    
+    if ! grep -q "$reqId" "$REQ_ID_LOG"; then
+        # Extrahieren des Benutzers und der IP-Adresse
+        user=$(echo "$line" | grep -o -P '(?<=Login failed: ).*?(?= \(Remote IP)')
+        ip=$(echo "$line" | grep -o -P '(?<=Remote IP: ).*?(?=\))')
+        
+        # Speichern des vollständigen Logeintrags in ReqId.log
+        echo "$line" >> "$REQ_ID_LOG"
+        
+        # Speichern von Benutzer und IP in user.log
+        echo "Benutzer: $user, IP: $ip" >> "$USER_LOG"
+        
+        # Benachrichtigung über das Unraid Messenger-System senden
+        echo "Benutzer $user mit IP $ip hat sich versucht anzumelden." | /usr/local/emhttp/webGui/scripts/notify -e "Unraid Hinweis" -s "Nextcloud Login-Fehler" -d "Benutzer: $user von IP: $ip" -i "normal"
+        
+        # Hinzufügen der ReqId zur ReqId.log
+        echo "$reqId" >> "$REQ_ID_LOG"
+        
+        # Wartezeit von 2 Sekunden
+        sleep 1
+    fi
+done    
+# Archiviere nextcloud.log, wenn die Größe 20 Kilobytes erreicht ist
+if [ "$(du "$NEXTCLOUD_LOG" | cut -f1)" -ge 20 ]; then
+    if [ ! -d "$ARCHIVE_DIR" ]; then
+            mkdir -p "$ARCHIVE_DIR"
+    fi
+    # Erstelle einen eindeutigen Namen für das Archiv
+    archive_name="nextcloud_log_$(date +'%Y%m%d_%H%M%S').log"
+    mv "$NEXTCLOUD_LOG" "$ARCHIVE_DIR/$archive_name"
+    touch "$NEXTCLOUD_LOG" # Neues nextcloud.log erstellen
+    chown "$NEXTCLOUD_LOG_USER" "$NEXTCLOUD_LOG"
+    chmod "$NEXTCLOUD_PERM" "$NEXTCLOUD_LOG"
+    chmod "$ARCHIV_PERM" "$ARCHIVE_DIR/$archive_name" # Berechtigungen für Archivfile setzen
+    chown "$ARCHIV_LOG_USER" "$ARCHIVE_DIR/$archive_name" # Berechtigungen für Archivfile setzen
+fi

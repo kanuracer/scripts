@@ -1,0 +1,112 @@
+#!/bin/bash
+
+# ----------------------------
+# Change
+# ----------------------------
+
+# backup destination
+BACKUP_DEST="/mnt/user/backup/boot/"
+# LOG directory
+LOG_DIR="/mnt/user/logs/backup"
+# Tempfiles directory
+TEMP_DIR="/mnt/user/backup/temp/"
+# backups to keep
+MAX_BACKUPS=3
+# zip-password
+PASSWORD="password"
+
+
+# ----------------------------
+# Do not change!
+# ----------------------------
+
+SOURCE="/boot/"
+LOG_FILE="$LOG_DIR/backup.log"
+ZIP_FILENAME="backup_$(date '+%Y%m%d%H%M%S').zip"
+# indexfiles
+INDEX_CURRENT="$LOG_DIR/index_current"
+INDEX_OLD="$LOG_DIR/index_old"
+
+# Funktion zum Protokollieren von Informationen
+log() {
+  local type="$1"
+  local message="$2"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $type: $message" >> "$LOG_FILE"
+}
+
+# Funktion zum Vergleichen von Index-Dateien und Protokollieren geänderter Dateien
+compare_and_log_changes() {
+  local index_old="$1"
+  local index_current="$2"
+
+  # Vergleiche die Index-Dateien und protokolliere Änderungen
+  diff_output=$(diff "$index_old" "$index_current")
+  if [ $? -eq 0 ]; then
+    log "Info" "Keine Änderungen im Quellverzeichnis festgestellt."
+  else
+    log "Info" "Änderungen im Quellverzeichnis festgestellt:"
+    log "CHANGE" "$diff_output"
+  fi
+}
+
+# Initialisierung: Überprüfen, ob ein Backup vorhanden ist
+if [ ! -f "$INDEX_CURRENT" ]; then
+  log "Info" "Kein vorhandenes Backup. Initialisiere Backup."
+
+  # Erstellen des Zip-Archivs
+  if rsync -a --delete --checksum --modify-window=1 "$SOURCE/" "$TEMP_DIR" \
+    --exclude=".fseventsd" --exclude=".git" --exclude=".Spotlight-V100" \
+    --exclude=".gitattributes" --exclude="syslinux.cfg-" \
+    --exclude="System Volume Information/" --exclude="previous/" \
+    --exclude="ldlinux.c32" --exclude="ldlinux.sys"; then
+    # Erstellen des Zip-Archivs
+    if TZ=UTC zip -r -P "$PASSWORD" "$BACKUP_DEST/$ZIP_FILENAME" -y "$TEMP_DIR"/*; then
+      # Erstellen der Index-Datei
+      find "$SOURCE" -type f \( ! -path "*/.git/*" -a ! -path "*/.fseventsd/*" -a ! -path "*/.Spotlight-V100/*" -a ! -path "*/System Volume Information/*" -a ! -path "*/previous/*" -a ! -name ".gitattributes" -a ! -name "syslinux.cfg-" -a ! -name "ldlinux.c32" -a ! -name "ldlinux.sys" -a ! -name "docker.cfg" \) -exec stat --format="%n %Y" {} \; > "$INDEX_CURRENT"
+      compare_and_log_changes "$INDEX_OLD" "$INDEX_CURRENT"
+    else
+      log "Error" "Fehler beim Erstellen des Zip-Archivs."
+    fi
+  else
+    log "Error" "Fehler beim Synchronisieren der Daten."
+  fi
+else
+  # Backup vorhanden: Vergleiche die Index-Dateien
+  mv "$INDEX_CURRENT" "$INDEX_OLD"
+
+   find "$SOURCE" -type f \( ! -path "*/.git/*" -a ! -path "*/.fseventsd/*" -a ! -path "*/.Spotlight-V100/*" -a ! -path "*/System Volume Information/*" -a ! -path "*/previous/*" -a ! -name ".gitattributes" -a ! -name "syslinux.cfg-" -a ! -name "ldlinux.c32" -a ! -name "ldlinux.sys" -a ! -name "docker.cfg" \) -exec stat --format="%n %Y" {} \; > "$INDEX_CURRENT"
+  compare_and_log_changes "$INDEX_OLD" "$INDEX_CURRENT"
+
+  # Überprüfe Änderungen zwischen Index-Dateien
+  if ! cmp -s "$INDEX_OLD" "$INDEX_CURRENT"; then
+    # Überprüfen Sie die Anzahl der vorhandenen Backups
+    num_backups=$(ls -1 "$BACKUP_DEST" | grep -c "backup_.*\.zip")
+
+    if [ "$num_backups" -ge "$MAX_BACKUPS" ]; then
+      # Löschen des ältesten Backups
+      oldest_backup=$(ls -1t "$BACKUP_DEST" | grep "backup_.*\.zip" | tail -1)
+      rm "$BACKUP_DEST/$oldest_backup"
+      log "Info" "Ältestes Backup ($oldest_backup) gelöscht."
+    fi
+
+    # Erstellen des Zip-Archivs
+    if rsync -a --delete --checksum --modify-window=1 "$SOURCE/" "$TEMP_DIR" \
+      --exclude=".fseventsd" --exclude=".git" --exclude=".Spotlight-V100" \
+      --exclude=".gitattributes" --exclude="syslinux.cfg-" \
+      --exclude="System Volume Information/" --exclude="previous/" \
+      --exclude="ldlinux.c32" --exclude="ldlinux.sys"; then
+      # Erstellen des Zip-Archivs
+      if TZ=UTC zip -r -P "$PASSWORD" "$BACKUP_DEST/$ZIP_FILENAME" -y "$TEMP_DIR"/*; then
+        compare_and_log_changes "$INDEX_OLD" "$INDEX_CURRENT"
+      else
+        log "Error" "Fehler beim Erstellen des Zip-Archivs."
+      fi
+    else
+      log "Error" "Fehler beim Synchronisieren der Daten."
+    fi
+  fi
+
+  # Lösche die temporären Dateien
+  rm "$INDEX_OLD"
+  rm -r "$TEMP_DIR"
+fi
